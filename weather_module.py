@@ -187,6 +187,11 @@ class WeatherAPI:
             try:
                 forecast = model.predict(pred_df)
                 predictions[target] = forecast['yhat'].values
+                # Debug: print all regressor values used for this prediction
+                print(f"  🔎 {target} prediction input sample:")
+                for reg in required_regressors:
+                    vals = pred_df[reg][:3].tolist() if reg in pred_df else 'N/A'
+                    print(f"    {reg}: {vals}")
                 print(f"  ✅ Predicted {target}: {predictions[target][:3]}...")
                 
             except Exception as e:
@@ -200,7 +205,11 @@ class WeatherAPI:
                     predictions[target] = np.array([26.0] * len(future_df))
                 elif target == 'chance_of_rain':
                     predictions[target] = np.array([20.0] * len(future_df))
-        
+        print("\n🔬 Pipeline debug summary:")
+        for target in available_targets:
+            vals = predictions[target][:3] if target in predictions else 'N/A'
+            print(f"  {target}: {vals} ...")
+        print()
         return predictions
 
     
