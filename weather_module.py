@@ -126,36 +126,27 @@ class WeatherAPI:
     def _safe_predict(self, model, df):
         """
         Call model.predict(df) and automatically add any missing regressor columns
-        with zeros if the model expects them. This handles errors like
-        "Regressor 'wind_speed_10m' missing from dataframe" from Prophet.
+        with zeros if the model expects them.
         """
+        import pandas as pd
+        
+        # Make a copy to avoid side effects
+        df2 = df.copy()
+
+        # ✅ Ensure all regressors expected by the model exist
+        if hasattr(model, "extra_regressors") and model.extra_regressors:
+            for reg in model.extra_regressors.keys():
+                if reg not in df2.columns:
+                    df2[reg] = 0
+                    print(f"⚠️  Added missing regressor column '{reg}' with zeros for prediction")
+
+        # Safe prediction attempt
         try:
-            return model.predict(df)
+            return model.predict(df2)
         except Exception as e:
-            msg = str(e)
-            # Try to detect missing regressor name in common error patterns
-            missing = []
-            if "Regressor '" in msg and "' missing from dataframe" in msg:
-                # extract name between single quotes
-                try:
-                    start = msg.index("Regressor '") + len("Regressor '")
-                    end = msg.index("' missing from dataframe", start)
-                    missing_name = msg[start:end]
-                    missing.append(missing_name)
-                except Exception:
-                    pass
-
-            # If we found missing regressors, add them as zero columns and retry
-            if missing:
-                df2 = df.copy()
-                for col in missing:
-                    if col not in df2.columns:
-                        df2[col] = 0
-                        print(f"⚠️  Added missing regressor column '{col}' with zeros for prediction")
-                return model.predict(df2)
-
-            # Otherwise re-raise original exception
+            print(f"❌ Prediction error: {e}")
             raise
+
     
     def _ensure_city_models_loaded(self, city: str, targets: List[str]):
         """

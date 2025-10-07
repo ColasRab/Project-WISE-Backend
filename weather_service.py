@@ -139,19 +139,10 @@ async def get_forecast(
             }
         )
 
-    # Parse date first and return a clear 400 on parse errors
     try:
         target_dt = datetime.strptime(target_date, "%Y-%m-%d")
-    except ValueError as e:
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "message": f"Invalid date format. Use YYYY-MM-DD: {str(e)}"}
-        )
-
-    # Main forecasting logic — handle model-related ValueError separately (map to 404)
-    try:
         now = datetime.now()
-
+        
         # Calculate days ahead for logging
         days_ahead = (target_dt - now).days
         print(f"📅 Forecast request: {days_ahead} days ahead ({target_date})")
@@ -160,18 +151,18 @@ async def get_forecast(
             # Full day forecast with lazy loading
             print(f"⚡ Using lazy-loaded full-day forecast")
             target_start = target_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-
+            
             # Check if target is in the past
             if target_start < now.replace(hour=0, minute=0, second=0, microsecond=0):
                 return JSONResponse(
                     status_code=400,
                     content={"status": "error", "message": "Cannot forecast for past dates"}
                 )
-
+            
             # Models will be loaded on-demand inside this call
-            # Use city-based forecast retrieval (WeatherAPI maps city->models internally)
+            # Use city-based forecast retrieval (WeatherAPI should map city->models internally)
             forecasts = api.get_forecast_for_day(target_dt, sample_every=3, city_name=city)
-
+            
         else:
             # Single hour forecast with lazy loading
             print(f"⚡ Using lazy-loaded single-hour forecast")
@@ -183,21 +174,21 @@ async def get_forecast(
                 )
 
             target_datetime = target_dt.replace(hour=target_hour_int, minute=0, second=0, microsecond=0)
-
+            
             # Check if target is in the past
             if target_datetime < now:
                 return JSONResponse(
                     status_code=400,
                     content={"status": "error", "message": "Cannot forecast for past times"}
                 )
-
+            
             # Models will be loaded on-demand inside this call
             # Use city-based forecast retrieval
             forecast = api.get_forecast_for_datetime(target_datetime, city_name=city)
             forecasts = [forecast]
 
         elapsed = time.time() - start_time
-
+        
         # Get current loading stats
         models_info = api.get_loaded_models_info()
         print(f"✅ Generated {len(forecasts)} forecast(s) in {elapsed:.2f}s")
@@ -216,7 +207,7 @@ async def get_forecast(
 
         return {
             "status": "success",
-            "location": {"city": city, "name": city},
+                "location": {"city": city, "name": city},
             "forecast": forecasts,
             "meta": {
                 "generation_time_seconds": round(elapsed, 2),
@@ -231,17 +222,9 @@ async def get_forecast(
         }
 
     except ValueError as e:
-        # Treat ValueError from WeatherAPI (e.g., missing model files) as 404 Not Found
-        msg = str(e)
-        print(f"⚠️ Model lookup error: {msg}")
         return JSONResponse(
-            status_code=404,
-            content={
-                "status": "not_found",
-                "message": msg,
-                "location": {"city": city},
-                "forecast": []
-            }
+            status_code=400,
+            content={"status": "error", "message": f"Invalid date format. Use YYYY-MM-DD: {str(e)}"}
         )
     except Exception as e:
         print(f"❌ ERROR: {e}")
