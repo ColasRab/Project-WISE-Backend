@@ -36,20 +36,44 @@ class WeatherAPI:
             return
         
         model_files = [f for f in os.listdir(self.model_dir) if f.endswith('_prophet.pkl')]
-        
+
+        # Known targets used by the forecasting models. We match longest targets first
+        # so multi-word targets like 'chance_of_rain' are detected correctly.
+        known_targets = [
+            'chance_of_rain',
+            'wind_speed_10m',
+            'apparent_temperature',
+            'relative_humidity_2m'
+        ]
+
         for model_file in model_files:
-            # Parse filename: {city}_{target}_prophet.pkl
-            parts = model_file.replace('_prophet.pkl', '').rsplit('_', 1)
-            if len(parts) == 2:
-                city, target = parts
-                
-                if city not in self.available_model_files:
-                    self.available_model_files[city] = {}
-                
-                filepath = os.path.join(self.model_dir, model_file)
-                self.available_model_files[city][target] = filepath
-                self.available_cities.add(city)
-                print(f"📋 Found model: {city} -> {target}")
+            base = model_file.replace('_prophet.pkl', '')
+
+            # Find which known target the filename ends with (longest-first)
+            matched_target = None
+            for t in sorted(known_targets, key=len, reverse=True):
+                if base.endswith('_' + t):
+                    matched_target = t
+                    city = base[:-(len(t) + 1)]  # remove '_' + target
+                    break
+
+            # If no known target matched, skip this file (or fallback to last underscore)
+            if not matched_target:
+                # fallback: split once on last underscore
+                parts = base.rsplit('_', 1)
+                if len(parts) == 2:
+                    city, matched_target = parts
+                else:
+                    print(f"⚠️  Unable to parse model filename: {model_file}")
+                    continue
+
+            if city not in self.available_model_files:
+                self.available_model_files[city] = {}
+
+            filepath = os.path.join(self.model_dir, model_file)
+            self.available_model_files[city][matched_target] = filepath
+            self.available_cities.add(city)
+            print(f"📋 Found model: {city} -> {matched_target}")
         
         if not self.available_model_files:
             raise FileNotFoundError(f"No valid Prophet models found in {self.model_dir}")
