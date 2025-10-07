@@ -74,7 +74,7 @@ def root():
         "optimization": "Lazy loading - models loaded on-demand for ultra-fast startup",
         "endpoints": {
             "health": "/health",
-            "weather": "/api/weather?lat={lat}&lon={lon}&target_date={YYYY-MM-DD}&target_hour={0-23 or 'all'}",
+            "weather": "/api/weather?city={city}&target_date={YYYY-MM-DD}&target_hour={0-23 or 'all'}",
             "models_info": "/api/models/info"
         }
     }
@@ -121,8 +121,7 @@ def models_info():
 
 @app.get("/api/weather")
 async def get_forecast(
-    lat: float = Query(..., description="Latitude"),
-    lon: float = Query(..., description="Longitude"),
+    city: str = Query(..., description="City name (e.g. 'Manila')"),
     target_date: str = Query(..., description="Target date (YYYY-MM-DD)"),
     target_hour: str = Query("all", description="Target hour (0-23) or 'all' for full day")
 ):
@@ -135,7 +134,7 @@ async def get_forecast(
             content={
                 "status": "loading",
                 "message": f"Models are still being scanned: {model_scan_error or 'please retry shortly'}",
-                "location": {"latitude": lat, "longitude": lon},
+                "location": {"city": city},
                 "forecast": []
             }
         )
@@ -161,7 +160,8 @@ async def get_forecast(
                 )
             
             # Models will be loaded on-demand inside this call
-            forecasts = api.get_forecast_for_day(target_dt, sample_every=3)
+            # Use city-based forecast retrieval (WeatherAPI should map city->models internally)
+            forecasts = api.get_forecast_for_day(target_dt, sample_every=3, city=city)
             
         else:
             # Single hour forecast with lazy loading
@@ -183,7 +183,8 @@ async def get_forecast(
                 )
             
             # Models will be loaded on-demand inside this call
-            forecast = api.get_forecast_for_datetime(target_datetime)
+            # Use city-based forecast retrieval
+            forecast = api.get_forecast_for_datetime(target_datetime, city=city)
             forecasts = [forecast]
 
         elapsed = time.time() - start_time
@@ -199,14 +200,14 @@ async def get_forecast(
                 content={
                     "status": "no_data",
                     "message": "No forecast data available for the requested time",
-                    "location": {"latitude": lat, "longitude": lon},
+                    "location": {"city": city},
                     "forecast": []
                 }
             )
 
         return {
             "status": "success",
-            "location": {"latitude": lat, "longitude": lon, "name": f"{lat}, {lon}"},
+                "location": {"city": city, "name": city},
             "forecast": forecasts,
             "meta": {
                 "generation_time_seconds": round(elapsed, 2),
@@ -234,7 +235,7 @@ async def get_forecast(
                 "status": "error",
                 "message": f"Error generating forecast: {str(e)}",
                 "error_type": type(e).__name__,
-                "location": {"latitude": lat, "longitude": lon},
+                "location": {"city": city},
                 "forecast": []
             }
         )
