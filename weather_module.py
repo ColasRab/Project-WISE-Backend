@@ -123,29 +123,85 @@ class WeatherAPI:
                 print(f"⚠️  Failed to load {filepath}: {e}")
                 raise
 
-    def _safe_predict(self, model, df):
+    def _get_model_regressors(self, model) -> List[str]:
+        """Get list of regressor names expected by a Prophet model"""
+        regressors = []
+        if hasattr(model, "extra_regressors") and model.extra_regressors:
+            regressors.extend(model.extra_regressors.keys())
+        return regressors
+
+    def _predict_with_pipeline(self, city: str, future_df, targets: List[str]) -> Dict[str, Any]:
         """
-        Call model.predict(df) and automatically add any missing regressor columns
-        with zeros if the model expects them.
+        Sequential prediction pipeline using real predicted values as regressors.
+        
+        Pipeline order:
+        1. wind_speed_10m (base model, no regressors)
+        2. relative_humidity_2m (may use wind_speed)  
+        3. apparent_temperature (may use wind_speed, humidity)
+        4. chance_of_rain (may use wind_speed, humidity, temperature)
+        
+        Args:
+            city: City name
+            future_df: DataFrame with 'ds' column for prediction times
+            targets: List of target variables to predict
+            
+        Returns:
+            Dictionary mapping target -> predicted values array
         """
         import pandas as pd
         
-        # Make a copy to avoid side effects
-        df2 = df.copy()
-
-        # ✅ Ensure all regressors expected by the model exist
-        if hasattr(model, "extra_regressors") and model.extra_regressors:
-            for reg in model.extra_regressors.keys():
-                if reg not in df2.columns:
-                    df2[reg] = 0
-                    print(f"⚠️  Added missing regressor column '{reg}' with zeros for prediction")
-
-        # Safe prediction attempt
-        try:
-            return model.predict(df2)
-        except Exception as e:
-            print(f"❌ Prediction error: {e}")
-            raise
+        predictions = {}
+        predicted_df = future_df.copy()
+        
+        # Define pipeline order (dependencies flow forward)
+        pipeline_order = [
+            'wind_speed_10m',
+            'relative_humidity_2m', 
+            'apparent_temperature',
+            'chance_of_rain'
+        ]
+        
+        # Only predict targets that are requested and available
+        available_targets = [t for t in pipeline_order if t in targets and 
+                           city in self.models and t in self.models[city]]
+        
+        print(f"🔄 Running multi-stage pipeline for {city}: {available_targets}")
+        
+        for target in available_targets:
+            model = self.models[city][target]
+            required_regressors = self._get_model_regressors(model)
+            
+            # Prepare prediction DataFrame with available regressors
+            pred_df = predicted_df.copy()
+            
+            for reg in required_regressors:
+                if reg in predictions:
+                    # Use previously predicted values as regressors
+                    pred_df[reg] = predictions[reg]
+                    print(f"  ✅ Using predicted {reg} as regressor for {target}")
+                else:
+                    # Fallback to zeros if regressor not available
+                    pred_df[reg] = 0
+                    print(f"  ⚠️  Using zeros for missing regressor {reg} in {target}")
+            
+            try:
+                forecast = model.predict(pred_df)
+                predictions[target] = forecast['yhat'].values
+                print(f"  ✅ Predicted {target}: {predictions[target][:3]}...")
+                
+            except Exception as e:
+                print(f"  ❌ Failed to predict {target}: {e}")
+                # Provide fallback values
+                if target == 'wind_speed_10m':
+                    predictions[target] = np.array([5.0] * len(future_df))
+                elif target == 'relative_humidity_2m':
+                    predictions[target] = np.array([60.0] * len(future_df))
+                elif target == 'apparent_temperature':
+                    predictions[target] = np.array([26.0] * len(future_df))
+                elif target == 'chance_of_rain':
+                    predictions[target] = np.array([20.0] * len(future_df))
+        
+        return predictions
 
     
     def _ensure_city_models_loaded(self, city: str, targets: List[str]):
@@ -215,19 +271,19 @@ class WeatherAPI:
         # Create DataFrame with just the target datetime
         future_df = pd.DataFrame({'ds': [target_datetime]})
         
-        # Get predictions from all models for this city
-        predictions = {}
+        # Use multi-stage pipeline prediction
+        predictions = self._predict_with_pipeline(city, future_df, targets)
         
-        for target in targets:
-            if city in self.models and target in self.models[city]:
-                forecast = self._safe_predict(self.models[city][target], future_df)
-                predictions[target] = forecast['yhat'].values[0]
+        # Extract single values (index 0) from arrays
+        single_predictions = {}
+        for target, values in predictions.items():
+            single_predictions[target] = values[0] if len(values) > 0 else 0
         
         # Extract values with defaults
-        chance_of_rain = max(0, min(100, predictions.get('chance_of_rain', 0)))
-        wind_speed = max(0, predictions.get('wind_speed_10m', 0))
-        temp = predictions.get('apparent_temperature', 25)
-        humidity = max(0, min(100, predictions.get('relative_humidity_2m', 50)))
+        chance_of_rain = max(0, min(100, single_predictions.get('chance_of_rain', 0)))
+        wind_speed = max(0, single_predictions.get('wind_speed_10m', 0))
+        temp = single_predictions.get('apparent_temperature', 25)
+        humidity = max(0, min(100, single_predictions.get('relative_humidity_2m', 50)))
         
         # Calculate precipitation from chance of rain (estimate)
         # Higher chance of rain = higher expected precipitation
@@ -290,13 +346,8 @@ class WeatherAPI:
         # Create DataFrame for all target times at once
         future_df = pd.DataFrame({'ds': future_dates})
         
-        # Get predictions from all models in batch
-        predictions = {}
-        
-        for target in targets:
-            if city in self.models and target in self.models[city]:
-                forecast = self._safe_predict(self.models[city][target], future_df)
-                predictions[target] = forecast['yhat'].values
+        # Use multi-stage pipeline prediction for all timestamps
+        predictions = self._predict_with_pipeline(city, future_df, targets)
         
         # Build forecast results
         forecasts = []
