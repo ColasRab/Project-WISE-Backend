@@ -1,5 +1,20 @@
+# Core web framework
 fastapi
 uvicorn
+
+# ML and forecasting
 prophet
 pandas
+numpy
+scikit-learn
+
+# Model serialization
 joblib
+
+# Additional dependencies for Prophet
+cmdstanpy
+pystan
+
+# Optional performance improvements
+python-multipart
+httpx

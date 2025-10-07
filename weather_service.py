@@ -1,4 +1,4 @@
-# weather_service.py (optimized for fast long-range forecasts)
+# weather_service.py (optimized with lazy loading)
 import os
 import sys
 import threading
@@ -10,13 +10,13 @@ import time
 from datetime import datetime
 
 print("=" * 60)
-print("STARTING OPTIMIZED WEATHER SERVICE")
+print("STARTING LAZY-LOADING WEATHER SERVICE")
 print(f"Python version: {sys.version}")
 print(f"Current directory: {os.getcwd()}")
 print(f"PORT environment variable: {os.environ.get('PORT', 'NOT SET')}")
 print("=" * 60)
 
-app = FastAPI(title="Weather API", version="2.0-optimized")
+app = FastAPI(title="Weather API", version="2.1-lazy-loading")
 
 # CORS middleware
 app.add_middleware(
@@ -29,12 +29,13 @@ app.add_middleware(
 
 # Globals
 api = None
-model_load_error = None
+model_scan_error = None
 models_ready = False
 
 
-def train_and_load_models():
-    global api, model_load_error, models_ready
+def scan_models():
+    """Scan available models without loading them (instant startup)"""
+    global api, model_scan_error, models_ready
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         model_dir = os.path.join(script_dir, "models")
@@ -43,11 +44,11 @@ def train_and_load_models():
         from weather_module import WeatherAPI
         api = WeatherAPI(model_dir=model_dir)
         models_ready = True
-        print("✅ Pretrained models loaded successfully!")
+        print("✅ Model scan complete! Ready for lazy loading.")
 
     except Exception as e:
-        model_load_error = str(e)
-        print(f"❌ Failed to load models: {e}")
+        model_scan_error = str(e)
+        print(f"❌ Failed to scan models: {e}")
         traceback.print_exc()
 
 
@@ -59,21 +60,22 @@ async def startup_event():
     print(f"🚀 Server binding to 0.0.0.0:{port}")
     print("=" * 60)
 
-    # Spawn background thread so port binds immediately
-    threading.Thread(target=train_and_load_models, daemon=True).start()
+    # Scan models in background (very fast - just reads filenames)
+    threading.Thread(target=scan_models, daemon=True).start()
 
 
 @app.get("/")
 def root():
     return {
-        "status": "Weather API is running (optimized)",
-        "version": "2.0-optimized",
-        "models_loaded": models_ready,
-        "model_load_error": model_load_error,
-        "optimization": "Fast long-range forecasts up to 5+ months",
+        "status": "Weather API is running (lazy-loading)",
+        "version": "2.1-lazy-loading",
+        "models_ready": models_ready,
+        "model_scan_error": model_scan_error,
+        "optimization": "Lazy loading - models loaded on-demand for ultra-fast startup",
         "endpoints": {
             "health": "/health",
-            "weather": "/api/weather?lat={lat}&lon={lon}&target_date={YYYY-MM-DD}&target_hour={0-23 or 'all'}"
+            "weather": "/api/weather?lat={lat}&lon={lon}&target_date={YYYY-MM-DD}&target_hour={0-23 or 'all'}",
+            "models_info": "/api/models/info"
         }
     }
 
@@ -82,10 +84,39 @@ def root():
 def health():
     return {
         "status": "healthy" if models_ready else "loading",
-        "models_loaded": models_ready,
-        "model_load_error": model_load_error,
+        "models_ready": models_ready,
+        "model_scan_error": model_scan_error,
         "port": os.environ.get("PORT", "8000")
     }
+
+
+@app.get("/api/models/info")
+def models_info():
+    """Get information about loaded vs available models"""
+    if not models_ready or api is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "loading",
+                "message": "Models are still being scanned"
+            }
+        )
+    
+    try:
+        info = api.get_loaded_models_info()
+        return {
+            "status": "success",
+            "lazy_loading": True,
+            **info
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": str(e)
+            }
+        )
 
 
 @app.get("/api/weather")
@@ -95,7 +126,7 @@ async def get_forecast(
     target_date: str = Query(..., description="Target date (YYYY-MM-DD)"),
     target_hour: str = Query("all", description="Target hour (0-23) or 'all' for full day")
 ):
-    """Get weather forecast for a specific date and hour (optimized)."""
+    """Get weather forecast for a specific date and hour (with lazy loading)."""
     start_time = time.time()
 
     if not models_ready or api is None:
@@ -103,7 +134,7 @@ async def get_forecast(
             status_code=503,
             content={
                 "status": "loading",
-                "message": f"Models are still loading: {model_load_error or 'please retry shortly'}",
+                "message": f"Models are still being scanned: {model_scan_error or 'please retry shortly'}",
                 "location": {"latitude": lat, "longitude": lon},
                 "forecast": []
             }
@@ -118,8 +149,8 @@ async def get_forecast(
         print(f"📅 Forecast request: {days_ahead} days ahead ({target_date})")
 
         if target_hour == "all":
-            # OPTIMIZED: Get full day forecast directly without iterating through all intermediate dates
-            print(f"⚡ Using optimized full-day forecast method")
+            # Full day forecast with lazy loading
+            print(f"⚡ Using lazy-loaded full-day forecast")
             target_start = target_dt.replace(hour=0, minute=0, second=0, microsecond=0)
             
             # Check if target is in the past
@@ -129,11 +160,12 @@ async def get_forecast(
                     content={"status": "error", "message": "Cannot forecast for past dates"}
                 )
             
+            # Models will be loaded on-demand inside this call
             forecasts = api.get_forecast_for_day(target_dt, sample_every=3)
             
         else:
-            # OPTIMIZED: Get single hour forecast directly
-            print(f"⚡ Using optimized single-hour forecast method")
+            # Single hour forecast with lazy loading
+            print(f"⚡ Using lazy-loaded single-hour forecast")
             target_hour_int = int(target_hour)
             if target_hour_int < 0 or target_hour_int > 23:
                 return JSONResponse(
@@ -150,11 +182,16 @@ async def get_forecast(
                     content={"status": "error", "message": "Cannot forecast for past times"}
                 )
             
+            # Models will be loaded on-demand inside this call
             forecast = api.get_forecast_for_datetime(target_datetime)
             forecasts = [forecast]
 
         elapsed = time.time() - start_time
-        print(f"✅ Generated {len(forecasts)} forecast(s) in {elapsed:.2f}s (optimized)")
+        
+        # Get current loading stats
+        models_info = api.get_loaded_models_info()
+        print(f"✅ Generated {len(forecasts)} forecast(s) in {elapsed:.2f}s")
+        print(f"📊 Models loaded: {models_info['loaded_models']}/{models_info['available_models']} ({models_info['memory_saved']} memory saved)")
 
         if not forecasts:
             return JSONResponse(
@@ -177,7 +214,9 @@ async def get_forecast(
                 "target_date": target_date,
                 "target_hour": target_hour,
                 "days_ahead": days_ahead,
-                "optimized": True
+                "lazy_loading": True,
+                "models_loaded": models_info['loaded_models'],
+                "models_available": models_info['available_models']
             }
         }
 
@@ -202,5 +241,5 @@ async def get_forecast(
 
 
 print("=" * 60)
-print("✅ OPTIMIZED APP CREATED SUCCESSFULLY")
+print("✅ LAZY-LOADING APP CREATED SUCCESSFULLY")
 print("=" * 60)

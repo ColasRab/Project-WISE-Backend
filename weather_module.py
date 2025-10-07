@@ -1,33 +1,36 @@
 """
-Optimized Weather Module - Fast forecasts using per-city Prophet models
+Optimized Weather Module - Fast forecasts using per-city Prophet models with lazy loading
 """
 import os
 import pickle
 from datetime import datetime, timedelta
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import numpy as np
 import joblib
+import threading
 
 
 class WeatherAPI:
-    """API for weather forecasting using pre-trained per-city Prophet models"""
+    """API for weather forecasting using lazy-loaded per-city Prophet models"""
     
     def __init__(self, model_dir: str):
         """
-        Initialize the Weather API with pre-trained models
+        Initialize the Weather API with lazy loading support
         
         Args:
             model_dir: Directory containing the pickled Prophet models
         """
-        self.models = {}
+        self.models = {}  # Cached loaded models
         self.model_dir = model_dir
         self.available_cities = set()
+        self.available_model_files = {}  # Map of city -> {target -> filepath}
+        self._lock = threading.Lock()  # Thread-safe model loading
         
-        # Load all pre-trained city models
-        self._load_city_models()
+        # Scan for available models without loading them
+        self._scan_available_models()
     
-    def _load_city_models(self):
-        """Load all available city models from the model directory"""
+    def _scan_available_models(self):
+        """Scan directory for available models without loading them"""
         if not os.path.exists(self.model_dir):
             print(f"⚠️  Model directory not found: {self.model_dir}")
             return
@@ -40,22 +43,73 @@ class WeatherAPI:
             if len(parts) == 2:
                 city, target = parts
                 
+                if city not in self.available_model_files:
+                    self.available_model_files[city] = {}
+                
                 filepath = os.path.join(self.model_dir, model_file)
-                try:
-                    if city not in self.models:
-                        self.models[city] = {}
-                    
-                    self.models[city][target] = joblib.load(filepath)
-                    self.available_cities.add(city)
-                    print(f"✅ Loaded model: {city} -> {target}")
-                except Exception as e:
-                    print(f"⚠️  Failed to load {model_file}: {e}")
+                self.available_model_files[city][target] = filepath
+                self.available_cities.add(city)
+                print(f"📋 Found model: {city} -> {target}")
         
-        if not self.models:
+        if not self.available_model_files:
             raise FileNotFoundError(f"No valid Prophet models found in {self.model_dir}")
         
-        print(f"\n📍 Loaded models for {len(self.available_cities)} cities")
+        print(f"\n📍 Scanned {len(self.available_cities)} cities with models available")
         print(f"Available cities: {sorted(self.available_cities)}")
+        print(f"💡 Models will be loaded on-demand (lazy loading)")
+    
+    def _load_city_model(self, city: str, target: str) -> Any:
+        """
+        Lazy load a specific model for a city and target
+        
+        Args:
+            city: City name
+            target: Target variable (e.g., 'wind_speed_10m')
+            
+        Returns:
+            Loaded Prophet model
+        """
+        with self._lock:  # Thread-safe loading
+            # Check if already loaded
+            if city in self.models and target in self.models[city]:
+                return self.models[city][target]
+            
+            # Check if model file exists
+            if city not in self.available_model_files:
+                raise ValueError(f"No models available for city: {city}")
+            
+            if target not in self.available_model_files[city]:
+                raise ValueError(f"No model available for {city} -> {target}")
+            
+            # Load the model
+            filepath = self.available_model_files[city][target]
+            try:
+                print(f"⚡ Lazy loading: {city} -> {target}")
+                model = joblib.load(filepath)
+                
+                # Cache the loaded model
+                if city not in self.models:
+                    self.models[city] = {}
+                self.models[city][target] = model
+                
+                print(f"✅ Loaded and cached: {city} -> {target}")
+                return model
+                
+            except Exception as e:
+                print(f"⚠️  Failed to load {filepath}: {e}")
+                raise
+    
+    def _ensure_city_models_loaded(self, city: str, targets: List[str]):
+        """
+        Ensure all required models for a city are loaded
+        
+        Args:
+            city: City name
+            targets: List of target variables needed
+        """
+        for target in targets:
+            if city not in self.models or target not in self.models[city]:
+                self._load_city_model(city, target)
     
     def _find_nearest_city(self, city_name: str) -> str:
         """Find the nearest matching city name (case-insensitive)"""
@@ -89,8 +143,8 @@ class WeatherAPI:
         Returns:
             Single forecast dictionary with weather data and assessment
         """
-        if not self.models:
-            raise Exception("No models loaded")
+        if not self.available_cities:
+            raise Exception("No models available")
         
         # Find matching city
         if city_name:
@@ -98,24 +152,26 @@ class WeatherAPI:
         else:
             city = sorted(self.available_cities)[0]
         
-        if city not in self.models:
+        if city not in self.available_model_files:
             raise ValueError(f"No models available for city: {city}")
         
         import pandas as pd
+        
+        # Available targets from training
+        targets = ['chance_of_rain', 'wind_speed_10m', 'apparent_temperature', 'relative_humidity_2m']
+        
+        # Lazy load only the models we need
+        self._ensure_city_models_loaded(city, targets)
         
         # Create DataFrame with just the target datetime
         future_df = pd.DataFrame({'ds': [target_datetime]})
         
         # Get predictions from all models for this city
         predictions = {}
-        city_models = self.models[city]
-        
-        # Available targets from training
-        targets = ['chance_of_rain', 'wind_speed_10m', 'apparent_temperature', 'relative_humidity_2m']
         
         for target in targets:
-            if target in city_models:
-                forecast = city_models[target].predict(future_df)
+            if city in self.models and target in self.models[city]:
+                forecast = self.models[city][target].predict(future_df)
                 predictions[target] = forecast['yhat'].values[0]
         
         # Extract values with defaults
@@ -155,8 +211,8 @@ class WeatherAPI:
         Returns:
             List of forecast dictionaries for the day
         """
-        if not self.models:
-            raise Exception("No models loaded")
+        if not self.available_cities:
+            raise Exception("No models available")
         
         # Find matching city
         if city_name:
@@ -164,10 +220,16 @@ class WeatherAPI:
         else:
             city = sorted(self.available_cities)[0]
         
-        if city not in self.models:
+        if city not in self.available_model_files:
             raise ValueError(f"No models available for city: {city}")
         
         import pandas as pd
+        
+        # Available targets from training
+        targets = ['chance_of_rain', 'wind_speed_10m', 'apparent_temperature', 'relative_humidity_2m']
+        
+        # Lazy load only the models we need
+        self._ensure_city_models_loaded(city, targets)
         
         # Create list of datetimes for the target day
         start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -181,13 +243,10 @@ class WeatherAPI:
         
         # Get predictions from all models in batch
         predictions = {}
-        city_models = self.models[city]
-        
-        targets = ['chance_of_rain', 'wind_speed_10m', 'apparent_temperature', 'relative_humidity_2m']
         
         for target in targets:
-            if target in city_models:
-                forecast = city_models[target].predict(future_df)
+            if city in self.models and target in self.models[city]:
+                forecast = self.models[city][target].predict(future_df)
                 predictions[target] = forecast['yhat'].values
         
         # Build forecast results
@@ -220,6 +279,24 @@ class WeatherAPI:
             forecasts.append(forecast_item)
         
         return forecasts
+    
+    def get_loaded_models_info(self) -> Dict[str, Any]:
+        """
+        Get information about currently loaded models
+        
+        Returns:
+            Dictionary with loaded models statistics
+        """
+        loaded_count = sum(len(targets) for targets in self.models.values())
+        available_count = sum(len(targets) for targets in self.available_model_files.values())
+        
+        return {
+            'loaded_models': loaded_count,
+            'available_models': available_count,
+            'loaded_cities': list(self.models.keys()),
+            'available_cities': sorted(self.available_cities),
+            'memory_saved': f"{((available_count - loaded_count) / available_count * 100):.1f}%" if available_count > 0 else "0%"
+        }
     
     def _assess_conditions(self, wind_speed: float, precip: float, 
                           temp: float, humidity: float) -> Dict[str, Any]:
