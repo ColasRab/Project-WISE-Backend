@@ -122,6 +122,40 @@ class WeatherAPI:
             except Exception as e:
                 print(f"⚠️  Failed to load {filepath}: {e}")
                 raise
+
+    def _safe_predict(self, model, df):
+        """
+        Call model.predict(df) and automatically add any missing regressor columns
+        with zeros if the model expects them. This handles errors like
+        "Regressor 'wind_speed_10m' missing from dataframe" from Prophet.
+        """
+        try:
+            return model.predict(df)
+        except Exception as e:
+            msg = str(e)
+            # Try to detect missing regressor name in common error patterns
+            missing = []
+            if "Regressor '" in msg and "' missing from dataframe" in msg:
+                # extract name between single quotes
+                try:
+                    start = msg.index("Regressor '") + len("Regressor '")
+                    end = msg.index("' missing from dataframe", start)
+                    missing_name = msg[start:end]
+                    missing.append(missing_name)
+                except Exception:
+                    pass
+
+            # If we found missing regressors, add them as zero columns and retry
+            if missing:
+                df2 = df.copy()
+                for col in missing:
+                    if col not in df2.columns:
+                        df2[col] = 0
+                        print(f"⚠️  Added missing regressor column '{col}' with zeros for prediction")
+                return model.predict(df2)
+
+            # Otherwise re-raise original exception
+            raise
     
     def _ensure_city_models_loaded(self, city: str, targets: List[str]):
         """
@@ -195,7 +229,7 @@ class WeatherAPI:
         
         for target in targets:
             if city in self.models and target in self.models[city]:
-                forecast = self.models[city][target].predict(future_df)
+                forecast = self._safe_predict(self.models[city][target], future_df)
                 predictions[target] = forecast['yhat'].values[0]
         
         # Extract values with defaults
@@ -270,7 +304,7 @@ class WeatherAPI:
         
         for target in targets:
             if city in self.models and target in self.models[city]:
-                forecast = self.models[city][target].predict(future_df)
+                forecast = self._safe_predict(self.models[city][target], future_df)
                 predictions[target] = forecast['yhat'].values
         
         # Build forecast results
