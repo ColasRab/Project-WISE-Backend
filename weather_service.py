@@ -161,7 +161,7 @@ async def get_forecast(
             
             # Models will be loaded on-demand inside this call
             # Use city-based forecast retrieval (WeatherAPI should map city->models internally)
-            forecasts = api.get_forecast_for_day(target_dt, sample_every=3, city=city)
+            forecasts = api.get_forecast_for_day(target_dt, sample_every=3, city_name=city)
             
         else:
             # Single hour forecast with lazy loading
@@ -184,7 +184,7 @@ async def get_forecast(
             
             # Models will be loaded on-demand inside this call
             # Use city-based forecast retrieval
-            forecast = api.get_forecast_for_datetime(target_datetime, city=city)
+            forecast = api.get_forecast_for_datetime(target_datetime, city_name=city)
             forecasts = [forecast]
 
         elapsed = time.time() - start_time
