@@ -495,27 +495,6 @@ class WeatherAPI:
             wind_cat = "Gale/Storm"
             wind_severity = 1.0
         
-        # === PRECIPITATION ASSESSMENT ===
-        # Note: This assesses actual precipitation, not chance of rain
-        if precip < 0.5:
-            precip_cat = "Dry"
-            precip_severity = 0.0
-        elif precip < 2.5:  # Light rain
-            precip_cat = "Light Rain"
-            precip_severity = 0.2
-        elif precip < 7.6:  # Moderate rain
-            precip_cat = "Moderate Rain"
-            precip_severity = 0.5
-        elif precip < 15:  # Heavy rain
-            precip_cat = "Heavy Rain"
-            precip_severity = 0.7
-        elif precip < 30:  # Very heavy rain
-            precip_cat = "Very Heavy Rain"
-            precip_severity = 0.85
-        else:  # Intense/Torrential
-            precip_cat = "Torrential Rain"
-            precip_severity = 1.0
-        
         # === CHANCE OF RAIN ASSESSMENT (if provided) ===
         rain_chance_severity = 0.0
         rain_chance_cat = None
@@ -617,12 +596,10 @@ class WeatherAPI:
         }
         
         # Use rain chance if available, otherwise use precipitation
-        rain_severity = rain_chance_severity if chance_of_rain is not None else precip_severity
-        
+        rain_severity = rain_chance_severity
         overall_risk = (
             wind_severity * weights['wind'] +
             rain_severity * weights['rain_chance'] +
-            precip_severity * weights['precipitation'] +
             temp_severity * weights['temperature'] +
             humid_severity * weights['humidity']
         )
@@ -644,8 +621,6 @@ class WeatherAPI:
         concerns = []
         if rain_severity >= 0.6:
             concerns.append("high chance of rain")
-        if precip_severity >= 0.6:
-            concerns.append("heavy precipitation")
         if wind_severity >= 0.5:
             concerns.append("strong winds")
         if temp_severity >= 0.6:
