@@ -612,7 +612,6 @@ class WeatherAPI:
         safe_for_outdoors = all([
             wind_severity < 0.6,
             rain_severity < 0.6,
-            precip_severity < 0.6,
             temp_severity < 0.6,
             humid_severity < 0.7
         ])
@@ -654,11 +653,7 @@ class WeatherAPI:
                 'severity': round(wind_severity, 2),
                 'safe': wind_severity < 0.6
             },
-            'precipitation': {
-                'category': precip_cat,
-                'severity': round(precip_severity, 2),
-                'safe': precip_severity < 0.6
-            },
+            
             'temperature': {
                 'category': temp_cat,
                 'severity': round(temp_severity, 2),
