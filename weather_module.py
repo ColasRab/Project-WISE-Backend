@@ -610,11 +610,10 @@ class WeatherAPI:
         # === OVERALL RISK CALCULATION ===
         # Weight factors based on impact on outdoor activities
         weights = {
-            'wind': 0.25,
-            'precipitation': 0.20,
-            'rain_chance': 0.25,  # Give weight to rain probability
-            'temperature': 0.20,
-            'humidity': 0.10
+            'wind': 0.25,           # Wind conditions
+            'rain_chance': 0.40,    # Chance of rain - HIGHEST PRIORITY for planning
+            'temperature': 0.20,    # Temperature/heat index
+            'humidity': 0.15        # Humidity - correlates with rain and comfort
         }
         
         # Use rain chance if available, otherwise use precipitation
