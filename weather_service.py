@@ -40,9 +40,10 @@ def scan_models():
     global api, model_scan_error, models_ready
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
-
-        # Try 'models' directory
+        
+        # Try both 'models' and 'models_v2' directories
         model_dirs = [
+            os.path.join(script_dir, "models_v2"),
             os.path.join(script_dir, "models")
         ]
         
