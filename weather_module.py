@@ -432,97 +432,285 @@ class WeatherAPI:
             'memory_saved': f"{((available_count - loaded_count) / available_count * 100):.1f}%" if available_count > 0 else "0%"
         }
     
+    def _calculate_heat_index(self, temp: float, humidity: float) -> float:
+        if temp < 27:  # Heat index not significant below 27°C
+            return temp
+        
+        # Convert to Fahrenheit for calculation
+        temp_f = (temp * 9/5) + 32
+        
+        # Rothfusz regression for heat index
+        hi_f = (-42.379 + 
+                2.04901523 * temp_f + 
+                10.14333127 * humidity - 
+                0.22475541 * temp_f * humidity - 
+                0.00683783 * temp_f * temp_f - 
+                0.05481717 * humidity * humidity + 
+                0.00122874 * temp_f * temp_f * humidity + 
+                0.00085282 * temp_f * humidity * humidity - 
+                0.00000199 * temp_f * temp_f * humidity * humidity)
+        
+        # Convert back to Celsius
+        hi_celsius = (hi_f - 32) * 5/9
+        return round(hi_celsius, 2)
+
+
     def _assess_conditions(self, wind_speed: float, precip: float, 
-                          temp: float, humidity: float) -> Dict[str, Any]:
-        """Assess weather conditions and generate risk assessment"""
-        # Wind assessment
-        if wind_speed < 3:
+                    temp: float, humidity: float, chance_of_rain: float = None) -> Dict[str, Any]:
+        """
+        Assess weather conditions and generate risk assessment.
+        Calibrated for Philippine tropical climate.
+            
+        Args:
+                wind_speed: Wind speed in m/s
+                precip: Precipitation in mm
+                temp: Temperature in Celsius
+                humidity: Relative humidity (0-100)
+                chance_of_rain: Optional probability of rain (0-100)
+            """
+            
+            # === WIND ASSESSMENT (Beaufort Scale adapted) ===
+        if wind_speed < 1.5:  # 0-5.4 km/h
             wind_cat = "Calm"
             wind_severity = 0.0
-        elif wind_speed < 7:
-            wind_cat = "Breezy"
+        elif wind_speed < 3.3:  # 5.4-12 km/h
+            wind_cat = "Light Breeze"
+            wind_severity = 0.1
+        elif wind_speed < 5.5:  # 12-20 km/h
+            wind_cat = "Gentle Breeze"
+            wind_severity = 0.2
+        elif wind_speed < 8.0:  # 20-29 km/h
+            wind_cat = "Moderate Breeze"
             wind_severity = 0.3
-        elif wind_speed < 12:
-            wind_cat = "Windy"
-            wind_severity = 0.6
+        elif wind_speed < 10.8:  # 29-39 km/h
+            wind_cat = "Fresh Breeze"
+            wind_severity = 0.5
+        elif wind_speed < 13.9:  # 39-50 km/h
+            wind_cat = "Strong Breeze"
+            wind_severity = 0.7
+        elif wind_speed < 17.2:  # 50-62 km/h
+            wind_cat = "Near Gale"
+            wind_severity = 0.85
         else:
-            wind_cat = "Very Windy"
-            wind_severity = 0.9
+            wind_cat = "Gale/Storm"
+            wind_severity = 1.0
         
-        # Precipitation assessment
-        if precip < 2.5:
+        # === PRECIPITATION ASSESSMENT ===
+        # Note: This assesses actual precipitation, not chance of rain
+        if precip < 0.5:
             precip_cat = "Dry"
             precip_severity = 0.0
-        elif precip < 7.6:
+        elif precip < 2.5:  # Light rain
             precip_cat = "Light Rain"
-            precip_severity = 0.3
-        elif precip < 50:
+            precip_severity = 0.2
+        elif precip < 7.6:  # Moderate rain
             precip_cat = "Moderate Rain"
-            precip_severity = 0.6
-        else:
+            precip_severity = 0.5
+        elif precip < 15:  # Heavy rain
             precip_cat = "Heavy Rain"
-            precip_severity = 0.9
+            precip_severity = 0.7
+        elif precip < 30:  # Very heavy rain
+            precip_cat = "Very Heavy Rain"
+            precip_severity = 0.85
+        else:  # Intense/Torrential
+            precip_cat = "Torrential Rain"
+            precip_severity = 1.0
         
-        # Temperature assessment
-        if temp < 20:
+        # === CHANCE OF RAIN ASSESSMENT (if provided) ===
+        rain_chance_severity = 0.0
+        rain_chance_cat = None
+        
+        if chance_of_rain is not None:
+            if chance_of_rain < 20:
+                rain_chance_cat = "Unlikely"
+                rain_chance_severity = 0.0
+            elif chance_of_rain < 40:
+                rain_chance_cat = "Slight Chance"
+                rain_chance_severity = 0.2
+            elif chance_of_rain < 60:
+                rain_chance_cat = "Possible"
+                rain_chance_severity = 0.4
+            elif chance_of_rain < 75:
+                rain_chance_cat = "Likely"
+                rain_chance_severity = 0.6
+            elif chance_of_rain < 90:
+                rain_chance_cat = "Very Likely"
+                rain_chance_severity = 0.8
+            else:
+                rain_chance_cat = "Imminent"
+                rain_chance_severity = 1.0
+        
+        # === TEMPERATURE ASSESSMENT (with Heat Index) ===
+        heat_index = self._calculate_heat_index(temp, humidity)
+        assessment_temp = heat_index  # Use heat index for assessment
+        
+        if assessment_temp < 20:
             temp_cat = "Cool"
-            temp_severity = 0.3
-        elif temp < 28:
+            temp_severity = 0.2
+            temp_description = "Cooler than usual for Philippines"
+        elif assessment_temp < 24:
             temp_cat = "Comfortable"
             temp_severity = 0.0
-        elif temp < 33:
+            temp_description = "Ideal temperature"
+        elif assessment_temp < 27:
+            temp_cat = "Pleasant"
+            temp_severity = 0.1
+            temp_description = "Comfortable warm weather"
+        elif assessment_temp < 32:
             temp_cat = "Warm"
             temp_severity = 0.3
-        else:
+            temp_description = "Stay hydrated"
+        elif assessment_temp < 37:
             temp_cat = "Hot"
-            temp_severity = 0.6
+            temp_severity = 0.5
+            temp_description = "Limit sun exposure, drink plenty of water"
+        elif assessment_temp < 41:
+            temp_cat = "Very Hot"
+            temp_severity = 0.7
+            temp_description = "Heat exhaustion possible, limit outdoor exposure"
+        elif assessment_temp < 54:
+            temp_cat = "Extreme Heat"
+            temp_severity = 0.9
+            temp_description = "Heat stroke likely, stay indoors with AC"
+        else:
+            temp_cat = "Dangerous"
+            temp_severity = 1.0
+            temp_description = "Life-threatening heat, stay indoors"
         
-        # Humidity assessment
-        if humidity < 40:
+        # === HUMIDITY ASSESSMENT (Philippine context: 70-90% is normal) ===
+        if humidity < 30:
+            humid_cat = "Very Dry"
+            humid_severity = 0.3
+            humid_description = "Unusually dry for Philippines"
+        elif humidity < 50:
             humid_cat = "Dry"
-            humid_severity = 0.2
-        elif humidity < 70:
+            humid_severity = 0.1
+            humid_description = "Lower than typical"
+        elif humidity < 65:
             humid_cat = "Comfortable"
             humid_severity = 0.0
-        else:
+            humid_description = "Ideal humidity level"
+        elif humidity < 75:
+            humid_cat = "Moderate"
+            humid_severity = 0.2
+            humid_description = "Typical for Philippines"
+        elif humidity < 85:
             humid_cat = "Humid"
             humid_severity = 0.4
-        
-        # Overall risk calculation
-        overall_risk = (wind_severity + precip_severity + temp_severity + humid_severity) / 4
-        
-        # Safety assessment
-        safe_for_outdoors = overall_risk < 0.5
-        
-        if safe_for_outdoors:
-            recommendation = "Conditions are favorable for outdoor activities."
-        elif overall_risk < 0.7:
-            recommendation = "Proceed with caution. Some outdoor activities may be affected."
+            humid_description = "Noticeably humid"
+        elif humidity < 92:
+            humid_cat = "Very Humid"
+            humid_severity = 0.6
+            humid_description = "High humidity, may feel uncomfortable"
         else:
-            recommendation = "Not recommended for outdoor activities. Stay indoors if possible."
+            humid_cat = "Oppressive"
+            humid_severity = 0.8
+            humid_description = "Extremely humid, rain likely imminent"
         
-        return {
+        # === OVERALL RISK CALCULATION ===
+        # Weight factors based on impact on outdoor activities
+        weights = {
+            'wind': 0.25,
+            'precipitation': 0.20,
+            'rain_chance': 0.25,  # Give weight to rain probability
+            'temperature': 0.20,
+            'humidity': 0.10
+        }
+        
+        # Use rain chance if available, otherwise use precipitation
+        rain_severity = rain_chance_severity if chance_of_rain is not None else precip_severity
+        
+        overall_risk = (
+            wind_severity * weights['wind'] +
+            rain_severity * weights['rain_chance'] +
+            precip_severity * weights['precipitation'] +
+            temp_severity * weights['temperature'] +
+            humid_severity * weights['humidity']
+        )
+        
+        # Adjust overall risk if humidity is extreme (>90%) - rain is very likely
+        if humidity > 90 and chance_of_rain is not None and chance_of_rain < 70:
+            overall_risk = min(overall_risk + 0.15, 1.0)  # Boost risk
+        
+        # === SAFETY ASSESSMENT ===
+        safe_for_outdoors = all([
+            wind_severity < 0.6,
+            rain_severity < 0.6,
+            precip_severity < 0.6,
+            temp_severity < 0.6,
+            humid_severity < 0.7
+        ])
+        
+        # === RECOMMENDATION ===
+        concerns = []
+        if rain_severity >= 0.6:
+            concerns.append("high chance of rain")
+        if precip_severity >= 0.6:
+            concerns.append("heavy precipitation")
+        if wind_severity >= 0.5:
+            concerns.append("strong winds")
+        if temp_severity >= 0.6:
+            concerns.append("extreme temperature")
+        if humid_severity >= 0.7:
+            concerns.append("very high humidity")
+        
+        if overall_risk < 0.2:
+            recommendation = "☀️ Excellent conditions for outdoor activities!"
+        elif overall_risk < 0.4:
+            recommendation = "✅ Good conditions. Enjoy outdoor activities with normal precautions."
+            if concerns:
+                recommendation += f" Watch for: {', '.join(concerns)}."
+        elif overall_risk < 0.6:
+            recommendation = "⚠️ Moderate conditions. Be prepared and monitor weather changes."
+            if concerns:
+                recommendation += f" Concerns: {', '.join(concerns)}."
+        elif overall_risk < 0.8:
+            recommendation = "⛔ Challenging conditions. Consider postponing outdoor plans."
+            if concerns:
+                recommendation += f" Due to: {', '.join(concerns)}."
+        else:
+            recommendation = "🚨 Dangerous conditions. Stay indoors if possible."
+            if concerns:
+                recommendation += f" Severe: {', '.join(concerns)}."
+        
+        # === BUILD RESPONSE ===
+        result = {
             'wind': {
                 'category': wind_cat,
-                'severity': wind_severity,
+                'severity': round(wind_severity, 2),
                 'safe': wind_severity < 0.6
             },
             'precipitation': {
                 'category': precip_cat,
-                'severity': precip_severity,
+                'severity': round(precip_severity, 2),
                 'safe': precip_severity < 0.6
             },
             'temperature': {
                 'category': temp_cat,
-                'severity': temp_severity,
-                'safe': temp_severity < 0.6
+                'severity': round(temp_severity, 2),
+                'safe': temp_severity < 0.6,
+                'actual_temp': round(temp, 2),
+                'feels_like': round(heat_index, 2),
+                'description': temp_description
             },
             'humidity': {
                 'category': humid_cat,
-                'severity': humid_severity,
-                'safe': humid_severity < 0.6
+                'severity': round(humid_severity, 2),
+                'safe': humid_severity < 0.7,
+                'description': humid_description
             },
             'overall_risk': round(overall_risk, 2),
             'safe_for_outdoors': safe_for_outdoors,
             'recommendation': recommendation
         }
+        
+        # Add rain chance info if provided
+        if chance_of_rain is not None:
+            result['rain_chance'] = {
+                'category': rain_chance_cat,
+                'probability': round(chance_of_rain, 1),
+                'severity': round(rain_chance_severity, 2),
+                'safe': rain_chance_severity < 0.6
+            }
+        
+        return result   
