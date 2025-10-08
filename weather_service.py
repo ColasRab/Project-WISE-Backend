@@ -1,4 +1,6 @@
-# weather_service.py (optimized with lazy loading)
+"""
+Weather Service API - Using XGBoost/LightGBM models with lazy loading
+"""
 import os
 import sys
 import threading
@@ -10,13 +12,13 @@ import time
 from datetime import datetime
 
 print("=" * 60)
-print("STARTING LAZY-LOADING WEATHER SERVICE")
+print("STARTING ML WEATHER SERVICE (XGBoost/LightGBM)")
 print(f"Python version: {sys.version}")
 print(f"Current directory: {os.getcwd()}")
 print(f"PORT environment variable: {os.environ.get('PORT', 'NOT SET')}")
 print("=" * 60)
 
-app = FastAPI(title="Weather API", version="2.1-lazy-loading")
+app = FastAPI(title="Weather API - ML Edition", version="3.0-ml")
 
 # CORS middleware
 app.add_middleware(
@@ -38,8 +40,23 @@ def scan_models():
     global api, model_scan_error, models_ready
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        model_dir = os.path.join(script_dir, "models")
-        os.makedirs(model_dir, exist_ok=True)
+
+        # Try 'models' directory
+        model_dirs = [
+            os.path.join(script_dir, "models")
+        ]
+        
+        model_dir = None
+        for d in model_dirs:
+            if os.path.exists(d):
+                model_dir = d
+                print(f"✅ Found model directory: {model_dir}")
+                break
+        
+        if not model_dir:
+            model_dir = model_dirs[0]
+            os.makedirs(model_dir, exist_ok=True)
+            print(f"📁 Created model directory: {model_dir}")
 
         from weather_module import WeatherAPI
         api = WeatherAPI(model_dir=model_dir)
@@ -67,8 +84,9 @@ async def startup_event():
 @app.get("/")
 def root():
     return {
-        "status": "Weather API is running (lazy-loading)",
-        "version": "2.1-lazy-loading",
+        "status": "Weather API is running",
+        "version": "3.0-ml",
+        "model_type": "XGBoost/LightGBM with lag features",
         "models_ready": models_ready,
         "model_scan_error": model_scan_error,
         "optimization": "Lazy loading - models loaded on-demand for ultra-fast startup",
@@ -86,6 +104,7 @@ def health():
         "status": "healthy" if models_ready else "loading",
         "models_ready": models_ready,
         "model_scan_error": model_scan_error,
+        "model_type": "XGBoost/LightGBM",
         "port": os.environ.get("PORT", "8000")
     }
 
@@ -106,6 +125,7 @@ def models_info():
         info = api.get_loaded_models_info()
         return {
             "status": "success",
+            "model_type": "XGBoost/LightGBM",
             "lazy_loading": True,
             **info
         }
@@ -125,7 +145,7 @@ async def get_forecast(
     target_date: str = Query(..., description="Target date (YYYY-MM-DD)"),
     target_hour: str = Query("all", description="Target hour (0-23) or 'all' for full day")
 ):
-    """Get weather forecast for a specific date and hour (with lazy loading)."""
+    """Get weather forecast for a specific date and hour using ML models."""
     start_time = time.time()
 
     if not models_ready or api is None:
@@ -145,11 +165,11 @@ async def get_forecast(
         
         # Calculate days ahead for logging
         days_ahead = (target_dt - now).days
-        print(f"📅 Forecast request: {days_ahead} days ahead ({target_date})")
+        print(f"📅 Forecast request: {days_ahead} days ahead ({target_date}) for {city}")
 
         if target_hour == "all":
             # Full day forecast with lazy loading
-            print(f"⚡ Using lazy-loaded full-day forecast")
+            print(f"⚡ Generating full-day ML forecast")
             target_start = target_dt.replace(hour=0, minute=0, second=0, microsecond=0)
             
             # Check if target is in the past
@@ -159,13 +179,12 @@ async def get_forecast(
                     content={"status": "error", "message": "Cannot forecast for past dates"}
                 )
             
-            # Models will be loaded on-demand inside this call
-            # Use city-based forecast retrieval (WeatherAPI should map city->models internally)
+            # Generate forecast for the day
             forecasts = api.get_forecast_for_day(target_dt, sample_every=3, city_name=city)
             
         else:
             # Single hour forecast with lazy loading
-            print(f"⚡ Using lazy-loaded single-hour forecast")
+            print(f"⚡ Generating single-hour ML forecast")
             target_hour_int = int(target_hour)
             if target_hour_int < 0 or target_hour_int > 23:
                 return JSONResponse(
@@ -182,8 +201,7 @@ async def get_forecast(
                     content={"status": "error", "message": "Cannot forecast for past times"}
                 )
             
-            # Models will be loaded on-demand inside this call
-            # Use city-based forecast retrieval
+            # Generate forecast for single datetime
             forecast = api.get_forecast_for_datetime(target_datetime, city_name=city)
             forecasts = [forecast]
 
@@ -191,7 +209,7 @@ async def get_forecast(
         
         # Get current loading stats
         models_info = api.get_loaded_models_info()
-        print(f"✅ Generated {len(forecasts)} forecast(s) in {elapsed:.2f}s")
+        print(f"✅ Generated {len(forecasts)} ML forecast(s) in {elapsed:.2f}s")
         print(f"📊 Models loaded: {models_info['loaded_models']}/{models_info['available_models']} ({models_info['memory_saved']} memory saved)")
 
         if not forecasts:
@@ -207,7 +225,7 @@ async def get_forecast(
 
         return {
             "status": "success",
-                "location": {"city": city, "name": city},
+            "location": {"city": city, "name": city},
             "forecast": forecasts,
             "meta": {
                 "generation_time_seconds": round(elapsed, 2),
@@ -215,6 +233,7 @@ async def get_forecast(
                 "target_date": target_date,
                 "target_hour": target_hour,
                 "days_ahead": days_ahead,
+                "model_type": "XGBoost/LightGBM",
                 "lazy_loading": True,
                 "models_loaded": models_info['loaded_models'],
                 "models_available": models_info['available_models']
@@ -242,5 +261,5 @@ async def get_forecast(
 
 
 print("=" * 60)
-print("✅ LAZY-LOADING APP CREATED SUCCESSFULLY")
+print("✅ ML WEATHER SERVICE INITIALIZED")
 print("=" * 60)

@@ -1,29 +1,32 @@
 """
-Optimized Weather Module - Fast forecasts using per-city Prophet models with lazy loading
+Optimized Weather Module - Fast forecasts using XGBoost/LightGBM models with lazy loading
 """
 import os
 import pickle
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 import numpy as np
+import pandas as pd
 import joblib
 import threading
 
 
 class WeatherAPI:
-    """API for weather forecasting using lazy-loaded per-city Prophet models"""
+    """API for weather forecasting using lazy-loaded XGBoost/LightGBM models"""
     
     def __init__(self, model_dir: str):
         """
         Initialize the Weather API with lazy loading support
         
         Args:
-            model_dir: Directory containing the pickled Prophet models
+            model_dir: Directory containing the pickled models, scalers, and feature lists
         """
-        self.models = {}  # Cached loaded models
+        self.models = {}  # Cached loaded models: {city: {target: model}}
+        self.scalers = {}  # Cached scalers: {city: {target: scaler}}
+        self.features = {}  # Cached feature lists: {city: {target: [feature_names]}}
         self.model_dir = model_dir
         self.available_cities = set()
-        self.available_model_files = {}  # Map of city -> {target -> filepath}
+        self.available_model_files = {}  # Map of city -> {target -> {model, scaler, features}}
         self._lock = threading.Lock()  # Thread-safe model loading
         
         # Scan for available models without loading them
@@ -35,10 +38,13 @@ class WeatherAPI:
             print(f"⚠️  Model directory not found: {self.model_dir}")
             return
         
-        model_files = [f for f in os.listdir(self.model_dir) if f.endswith('_prophet.pkl')]
+        # Look for model files (either xgboost or lightgbm)
+        all_files = os.listdir(self.model_dir)
+        model_files = [f for f in all_files if f.endswith('.pkl') and 
+                      ('xgboost' in f or 'lightgbm' in f) and 
+                      'scaler' not in f and 'features' not in f]
 
-        # Known targets used by the forecasting models. We match longest targets first
-        # so multi-word targets like 'chance_of_rain' are detected correctly.
+        # Known targets
         known_targets = [
             'chance_of_rain',
             'wind_speed_10m',
@@ -47,9 +53,21 @@ class WeatherAPI:
         ]
 
         for model_file in model_files:
-            base = model_file.replace('_prophet.pkl', '')
-
-            # Find which known target the filename ends with (longest-first)
+            # Extract city, target, and model_type
+            # Format: {city}_{target}_{model_type}.pkl
+            base = model_file.replace('.pkl', '')
+            
+            # Find model type (xgboost or lightgbm)
+            if base.endswith('_xgboost'):
+                model_type = 'xgboost'
+                base = base[:-9]  # Remove '_xgboost'
+            elif base.endswith('_lightgbm'):
+                model_type = 'lightgbm'
+                base = base[:-9]  # Remove '_lightgbm'
+            else:
+                continue
+            
+            # Find which target the filename contains (longest-first)
             matched_target = None
             for t in sorted(known_targets, key=len, reverse=True):
                 if base.endswith('_' + t):
@@ -57,172 +75,171 @@ class WeatherAPI:
                     city = base[:-(len(t) + 1)]  # remove '_' + target
                     break
 
-            # If no known target matched, skip this file (or fallback to last underscore)
             if not matched_target:
-                # fallback: split once on last underscore
-                parts = base.rsplit('_', 1)
-                if len(parts) == 2:
-                    city, matched_target = parts
-                else:
-                    print(f"⚠️  Unable to parse model filename: {model_file}")
-                    continue
+                print(f"⚠️  Unable to parse model filename: {model_file}")
+                continue
+
+            # Look for corresponding scaler and features files
+            scaler_file = f"{city}_{matched_target}_{model_type}_scaler.pkl"
+            features_file = f"{city}_{matched_target}_{model_type}_features.pkl"
+            
+            scaler_path = os.path.join(self.model_dir, scaler_file)
+            features_path = os.path.join(self.model_dir, features_file)
+            
+            if not os.path.exists(scaler_path) or not os.path.exists(features_path):
+                print(f"⚠️  Missing scaler or features for {city} -> {matched_target}")
+                continue
 
             if city not in self.available_model_files:
                 self.available_model_files[city] = {}
 
-            filepath = os.path.join(self.model_dir, model_file)
-            self.available_model_files[city][matched_target] = filepath
+            self.available_model_files[city][matched_target] = {
+                'model': os.path.join(self.model_dir, model_file),
+                'scaler': scaler_path,
+                'features': features_path,
+                'model_type': model_type
+            }
             self.available_cities.add(city)
-            print(f"📋 Found model: {city} -> {matched_target}")
+            print(f"📋 Found model: {city} -> {matched_target} ({model_type})")
         
         if not self.available_model_files:
-            raise FileNotFoundError(f"No valid Prophet models found in {self.model_dir}")
+            raise FileNotFoundError(f"No valid models found in {self.model_dir}")
         
-        print(f"\n📍 Scanned {len(self.available_cities)} cities with models available")
+        print(f"\n🔍 Scanned {len(self.available_cities)} cities with models available")
         print(f"Available cities: {sorted(self.available_cities)}")
         print(f"💡 Models will be loaded on-demand (lazy loading)")
     
-    def _load_city_model(self, city: str, target: str) -> Any:
+    def _load_city_model(self, city: str, target: str):
         """
-        Lazy load a specific model for a city and target
+        Lazy load a specific model, scaler, and features for a city and target
         
         Args:
             city: City name
             target: Target variable (e.g., 'wind_speed_10m')
-            
-        Returns:
-            Loaded Prophet model
         """
         with self._lock:  # Thread-safe loading
             # Check if already loaded
-            if city in self.models and target in self.models[city]:
-                return self.models[city][target]
+            if (city in self.models and target in self.models[city] and
+                city in self.scalers and target in self.scalers[city] and
+                city in self.features and target in self.features[city]):
+                return
             
-            # Check if model file exists
+            # Check if model files exist
             if city not in self.available_model_files:
                 raise ValueError(f"No models available for city: {city}")
             
             if target not in self.available_model_files[city]:
                 raise ValueError(f"No model available for {city} -> {target}")
             
-            # Load the model
-            filepath = self.available_model_files[city][target]
+            # Load the model, scaler, and features
+            files = self.available_model_files[city][target]
             try:
-                print(f"⚡ Lazy loading: {city} -> {target}")
-                model = joblib.load(filepath)
+                print(f"⚡ Lazy loading: {city} -> {target} ({files['model_type']})")
                 
-                # Cache the loaded model
+                model = joblib.load(files['model'])
+                scaler = joblib.load(files['scaler'])
+                feature_list = joblib.load(files['features'])
+                
+                # Cache the loaded components
                 if city not in self.models:
                     self.models[city] = {}
-                self.models[city][target] = model
+                    self.scalers[city] = {}
+                    self.features[city] = {}
                 
-                print(f"✅ Loaded and cached: {city} -> {target}")
-                return model
+                self.models[city][target] = model
+                self.scalers[city][target] = scaler
+                self.features[city][target] = feature_list
+                
+                print(f"✅ Loaded and cached: {city} -> {target} ({len(feature_list)} features)")
                 
             except Exception as e:
-                print(f"⚠️  Failed to load {filepath}: {e}")
+                print(f"⚠️  Failed to load model for {city} -> {target}: {e}")
                 raise
 
-    def _get_model_regressors(self, model) -> List[str]:
-        """Get list of regressor names expected by a Prophet model"""
-        regressors = []
-        if hasattr(model, "extra_regressors") and model.extra_regressors:
-            regressors.extend(model.extra_regressors.keys())
-        return regressors
-
-    def _predict_with_pipeline(self, city: str, future_df, targets: List[str]) -> Dict[str, Any]:
-        """
-        Sequential prediction pipeline using real predicted values as regressors.
+    def _create_time_features(self, dt: datetime) -> Dict[str, float]:
+        """Create time-based features for a single datetime"""
+        hour = dt.hour
+        day_of_week = dt.weekday()
+        day_of_year = dt.timetuple().tm_yday
+        month = dt.month
+        week_of_year = dt.isocalendar()[1]
         
-        Pipeline order:
-        1. wind_speed_10m (base model, no regressors)
-        2. relative_humidity_2m (may use wind_speed)  
-        3. apparent_temperature (may use wind_speed, humidity)
-        4. chance_of_rain (may use wind_speed, humidity, temperature)
+        return {
+            'hour': hour,
+            'day_of_week': day_of_week,
+            'day_of_year': day_of_year,
+            'month': month,
+            'week_of_year': week_of_year,
+            'hour_sin': np.sin(2 * np.pi * hour / 24),
+            'hour_cos': np.cos(2 * np.pi * hour / 24),
+            'day_sin': np.sin(2 * np.pi * day_of_year / 365),
+            'day_cos': np.cos(2 * np.pi * day_of_year / 365),
+            'month_sin': np.sin(2 * np.pi * month / 12),
+            'month_cos': np.cos(2 * np.pi * month / 12)
+        }
+    
+    def _create_feature_vector(self, city: str, target: str, dt: datetime, 
+                              historical_values: Dict[str, List[float]]) -> np.ndarray:
+        """
+        Create feature vector for prediction
         
         Args:
             city: City name
-            future_df: DataFrame with 'ds' column for prediction times
-            targets: List of target variables to predict
-            
+            target: Target variable
+            dt: Target datetime
+            historical_values: Dictionary of historical values for lag features
+                              Format: {'wind_speed_10m': [v1, v2, ...], ...}
+        
         Returns:
-            Dictionary mapping target -> predicted values array
+            Feature vector as numpy array
         """
-        import pandas as pd
+        feature_list = self.features[city][target]
+        feature_dict = {}
         
-        predictions = {}
-        predicted_df = future_df.copy()
+        # Add time features
+        time_features = self._create_time_features(dt)
+        feature_dict.update(time_features)
         
-        # Define pipeline order (dependencies flow forward)
-        pipeline_order = [
-            'wind_speed_10m',
-            'relative_humidity_2m', 
-            'apparent_temperature',
-            'chance_of_rain'
-        ]
+        # Add lag features
+        base_vars = ['temperature_2m', 'relative_humidity_2m', 'wind_speed_10m', 'apparent_temperature']
+        lags = [1, 3, 6, 12, 24]
         
-        # Only predict targets that are requested and available
-        available_targets = [t for t in pipeline_order if t in targets and 
-                           city in self.models and t in self.models[city]]
-        
-        print(f"🔄 Running multi-stage pipeline for {city}: {available_targets}")
-        
-        for target in available_targets:
-            model = self.models[city][target]
-            required_regressors = self._get_model_regressors(model)
-            
-            # Prepare prediction DataFrame with available regressors
-            pred_df = predicted_df.copy()
-            
-            for reg in required_regressors:
-                if reg in predictions:
-                    # Use previously predicted values as regressors
-                    pred_df[reg] = predictions[reg]
-                    print(f"  ✅ Using predicted {reg} as regressor for {target}")
-                else:
-                    # Fallback to zeros if regressor not available
-                    pred_df[reg] = 0
-                    print(f"  ⚠️  Using zeros for missing regressor {reg} in {target}")
-            
-            try:
-                forecast = model.predict(pred_df)
-                predictions[target] = forecast['yhat'].values
-                # Debug: print all regressor values used for this prediction
-                print(f"  🔎 {target} prediction input sample:")
-                for reg in required_regressors:
-                    vals = pred_df[reg][:3].tolist() if reg in pred_df else 'N/A'
-                    print(f"    {reg}: {vals}")
-                print(f"  ✅ Predicted {target}: {predictions[target][:3]}...")
+        for var in base_vars:
+            if var in historical_values:
+                values = historical_values[var]
+                for lag in lags:
+                    lag_key = f'{var}_lag_{lag}h'
+                    # Use the lag-th value from history (if available)
+                    if lag <= len(values):
+                        feature_dict[lag_key] = values[-lag]
+                    else:
+                        feature_dict[lag_key] = 0  # Default for missing history
                 
-            except Exception as e:
-                print(f"  ❌ Failed to predict {target}: {e}")
-                # Provide fallback values
-                if target == 'wind_speed_10m':
-                    predictions[target] = np.array([5.0] * len(future_df))
-                elif target == 'relative_humidity_2m':
-                    predictions[target] = np.array([60.0] * len(future_df))
-                elif target == 'apparent_temperature':
-                    predictions[target] = np.array([26.0] * len(future_df))
-                elif target == 'chance_of_rain':
-                    predictions[target] = np.array([20.0] * len(future_df))
-        print("\n🔬 Pipeline debug summary:")
-        for target in available_targets:
-            vals = predictions[target][:3] if target in predictions else 'N/A'
-            print(f"  {target}: {vals} ...")
-        print()
-        return predictions
-
+                # Rolling statistics
+                if len(values) >= 6:
+                    feature_dict[f'{var}_rolling_mean_6h'] = np.mean(values[-6:])
+                    feature_dict[f'{var}_rolling_std_6h'] = np.std(values[-6:])
+                else:
+                    feature_dict[f'{var}_rolling_mean_6h'] = values[-1] if values else 0
+                    feature_dict[f'{var}_rolling_std_6h'] = 0
+                
+                if len(values) >= 24:
+                    feature_dict[f'{var}_rolling_mean_24h'] = np.mean(values[-24:])
+                else:
+                    feature_dict[f'{var}_rolling_mean_24h'] = values[-1] if values else 0
+        
+        # Build feature vector in correct order
+        feature_vector = []
+        for feat_name in feature_list:
+            feature_vector.append(feature_dict.get(feat_name, 0))
+        
+        return np.array(feature_vector).reshape(1, -1)
     
     def _ensure_city_models_loaded(self, city: str, targets: List[str]):
-        """
-        Ensure all required models for a city are loaded
-        
-        Args:
-            city: City name
-            targets: List of target variables needed
-        """
+        """Ensure all required models for a city are loaded"""
         for target in targets:
-            if city not in self.models or target not in self.models[city]:
+            if (city not in self.models or target not in self.models[city] or
+                city not in self.scalers or target not in self.scalers[city]):
                 self._load_city_model(city, target)
     
     def _find_nearest_city(self, city_name: str) -> str:
@@ -269,34 +286,75 @@ class WeatherAPI:
         if city not in self.available_model_files:
             raise ValueError(f"No models available for city: {city}")
         
-        import pandas as pd
-        
         # Available targets from training
-        targets = ['chance_of_rain', 'wind_speed_10m', 'apparent_temperature', 'relative_humidity_2m']
+        targets = ['wind_speed_10m', 'apparent_temperature', 'relative_humidity_2m', 'chance_of_rain']
         
         # Lazy load only the models we need
         self._ensure_city_models_loaded(city, targets)
         
-        # Create DataFrame with just the target datetime
-        future_df = pd.DataFrame({'ds': [target_datetime]})
+        # Initialize historical values with reasonable defaults
+        # In production, you'd load recent actual data
+        historical_values = {
+            'temperature_2m': [28.0] * 24,
+            'relative_humidity_2m': [70.0] * 24,
+            'wind_speed_10m': [5.0] * 24,
+            'apparent_temperature': [28.0] * 24
+        }
         
-        # Use multi-stage pipeline prediction
-        predictions = self._predict_with_pipeline(city, future_df, targets)
+        predictions = {}
         
-        # Extract single values (index 0) from arrays
-        single_predictions = {}
-        for target, values in predictions.items():
-            single_predictions[target] = values[0] if len(values) > 0 else 0
+        # Predict each target
+        for target in targets:
+            if target not in self.models[city]:
+                continue
+            
+            try:
+                # Create feature vector
+                X = self._create_feature_vector(city, target, target_datetime, historical_values)
+                
+                # Scale features
+                X_scaled = self.scalers[city][target].transform(X)
+                
+                # Predict
+                pred = self.models[city][target].predict(X_scaled)[0]
+                
+                # Apply bounds if available
+                if hasattr(self.models[city][target], 'bounds'):
+                    lower, upper = self.models[city][target].bounds
+                    if lower is not None and upper is not None:
+                        pred = np.clip(pred, lower, upper)
+                
+                predictions[target] = float(pred)
+                
+                # Update historical values for next prediction
+                if target == 'wind_speed_10m':
+                    historical_values['wind_speed_10m'].append(pred)
+                elif target == 'apparent_temperature':
+                    historical_values['apparent_temperature'].append(pred)
+                    historical_values['temperature_2m'].append(pred)
+                elif target == 'relative_humidity_2m':
+                    historical_values['relative_humidity_2m'].append(pred)
+                
+            except Exception as e:
+                print(f"⚠️  Prediction failed for {target}: {e}")
+                # Fallback defaults
+                if target == 'wind_speed_10m':
+                    predictions[target] = 5.0
+                elif target == 'apparent_temperature':
+                    predictions[target] = 28.0
+                elif target == 'relative_humidity_2m':
+                    predictions[target] = 70.0
+                elif target == 'chance_of_rain':
+                    predictions[target] = 20.0
         
         # Extract values with defaults
-        chance_of_rain = max(0, min(100, single_predictions.get('chance_of_rain', 0)))
-        wind_speed = max(0, single_predictions.get('wind_speed_10m', 0))
-        temp = single_predictions.get('apparent_temperature', 25)
-        humidity = max(0, min(100, single_predictions.get('relative_humidity_2m', 50)))
+        wind_speed = max(0, predictions.get('wind_speed_10m', 5.0))
+        temp = predictions.get('apparent_temperature', 28.0)
+        humidity = max(0, min(100, predictions.get('relative_humidity_2m', 70.0)))
+        chance_of_rain = max(0, min(100, predictions.get('chance_of_rain', 20.0)))
         
-        # Calculate precipitation from chance of rain (estimate)
-        # Higher chance of rain = higher expected precipitation
-        precip = (chance_of_rain / 100) * 5  # Scale to reasonable mm range
+        # Calculate precipitation from chance of rain
+        precip = (chance_of_rain / 100) * 5
         
         # Assess conditions
         assessment = self._assess_conditions(wind_speed, precip, temp, humidity)
@@ -305,11 +363,11 @@ class WeatherAPI:
             'datetime': target_datetime.strftime('%Y-%m-%d %H:%M:%S'),
             'timestamp': int(target_datetime.timestamp()),
             'city': city.title(),
-            'predicted_wind_speed': round(float(wind_speed), 2),
-            'predicted_precip_mm': round(float(precip), 2),
-            'predicted_temp_c': round(float(temp), 2),
-            'predicted_humidity': round(float(humidity), 2),
-            'chance_of_rain': round(float(chance_of_rain), 2),
+            'predicted_wind_speed': round(wind_speed, 2),
+            'predicted_precip_mm': round(precip, 2),
+            'predicted_temp_c': round(temp, 2),
+            'predicted_humidity': round(humidity, 2),
+            'chance_of_rain': round(chance_of_rain, 2),
             'assessment': assessment
         }
     
@@ -337,10 +395,8 @@ class WeatherAPI:
         if city not in self.available_model_files:
             raise ValueError(f"No models available for city: {city}")
         
-        import pandas as pd
-        
         # Available targets from training
-        targets = ['chance_of_rain', 'wind_speed_10m', 'apparent_temperature', 'relative_humidity_2m']
+        targets = ['wind_speed_10m', 'apparent_temperature', 'relative_humidity_2m', 'chance_of_rain']
         
         # Lazy load only the models we need
         self._ensure_city_models_loaded(city, targets)
@@ -352,50 +408,19 @@ class WeatherAPI:
         for hour in range(0, 24, sample_every):
             future_dates.append(start_of_day + timedelta(hours=hour))
         
-        # Create DataFrame for all target times at once
-        future_df = pd.DataFrame({'ds': future_dates})
-        
-        # Use multi-stage pipeline prediction for all timestamps
-        predictions = self._predict_with_pipeline(city, future_df, targets)
-        
-        # Build forecast results
+        # Generate forecasts for each timestamp
         forecasts = []
-        
-        for i, dt in enumerate(future_dates):
-            chance_of_rain = max(0, min(100, predictions.get('chance_of_rain', [0] * len(future_dates))[i]))
-            wind_speed = max(0, predictions.get('wind_speed_10m', [0] * len(future_dates))[i])
-            temp = predictions.get('apparent_temperature', [25] * len(future_dates))[i]
-            humidity = max(0, min(100, predictions.get('relative_humidity_2m', [50] * len(future_dates))[i]))
-            
-            # Calculate precipitation from chance of rain
-            precip = (chance_of_rain / 100) * 5
-            
-            # Assess conditions
-            assessment = self._assess_conditions(wind_speed, precip, temp, humidity)
-            
-            forecast_item = {
-                'datetime': dt.strftime('%Y-%m-%d %H:%M:%S'),
-                'timestamp': int(dt.timestamp()),
-                'city': city.title(),
-                'predicted_wind_speed': round(float(wind_speed), 2),
-                'predicted_precip_mm': round(float(precip), 2),
-                'predicted_temp_c': round(float(temp), 2),
-                'predicted_humidity': round(float(humidity), 2),
-                'chance_of_rain': round(float(chance_of_rain), 2),
-                'assessment': assessment
-            }
-            
-            forecasts.append(forecast_item)
+        for dt in future_dates:
+            try:
+                forecast = self.get_forecast_for_datetime(dt, city_name=city)
+                forecasts.append(forecast)
+            except Exception as e:
+                print(f"⚠️  Failed to generate forecast for {dt}: {e}")
         
         return forecasts
     
     def get_loaded_models_info(self) -> Dict[str, Any]:
-        """
-        Get information about currently loaded models
-        
-        Returns:
-            Dictionary with loaded models statistics
-        """
+        """Get information about currently loaded models"""
         loaded_count = sum(len(targets) for targets in self.models.values())
         available_count = sum(len(targets) for targets in self.available_model_files.values())
         
@@ -409,18 +434,7 @@ class WeatherAPI:
     
     def _assess_conditions(self, wind_speed: float, precip: float, 
                           temp: float, humidity: float) -> Dict[str, Any]:
-        """
-        Assess weather conditions and generate risk assessment
-        
-        Args:
-            wind_speed: Wind speed in m/s
-            precip: Precipitation in mm
-            temp: Temperature in Celsius
-            humidity: Humidity percentage
-            
-        Returns:
-            Assessment dictionary with categories and safety info
-        """
+        """Assess weather conditions and generate risk assessment"""
         # Wind assessment
         if wind_speed < 3:
             wind_cat = "Calm"
@@ -449,7 +463,7 @@ class WeatherAPI:
             precip_cat = "Heavy Rain"
             precip_severity = 0.9
         
-        # Temperature assessment (adjusted for Philippine climate)
+        # Temperature assessment
         if temp < 20:
             temp_cat = "Cool"
             temp_severity = 0.3
